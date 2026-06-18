@@ -1,5 +1,4 @@
 import OpenAI from "openai";
-import { toStrictJsonSchema } from "openai/lib/transform";
 import { events, kv, timers } from "@slflows/sdk/v1";
 import { OpenAIAuth, createClient } from "../client";
 
@@ -28,6 +27,54 @@ export interface McpServer {
 export interface JsonSchema {
   name: string;
   schema: Record<string, any>;
+}
+
+function strictify(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(strictify);
+  }
+
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  return toStrictSchema(value as Record<string, unknown>);
+}
+
+// Strict structured outputs require every property to be present — there is no
+// absent key in strict mode. So we recursively force every property into
+// `required`, set additionalProperties:false on each object, and encode optional
+// fields (those absent from `required`) as nullable via `anyOf[…, {type:null}]`.
+export function toStrictSchema(node: Record<string, unknown>) {
+  const result: Record<string, unknown> = {};
+
+  for (const key of Object.keys(node)) {
+    result[key] = strictify(node[key]);
+  }
+
+  const properties = result.properties;
+
+  if (
+    result.type === "object" &&
+    properties &&
+    typeof properties === "object"
+  ) {
+    const props = properties as Record<string, unknown>;
+    const required = new Set(
+      Array.isArray(result.required) ? result.required : [],
+    );
+
+    for (const name of Object.keys(props)) {
+      if (!required.has(name)) {
+        props[name] = { anyOf: [props[name], { type: "null" }] };
+      }
+    }
+
+    result.required = Object.keys(props);
+    result.additionalProperties = false;
+  }
+
+  return result;
 }
 
 // OpenAI function/tool and MCP server labels must match ^[a-zA-Z0-9_-]{1,64}$.
@@ -102,14 +149,7 @@ export function streamResponse(params: {
           format: {
             type: "json_schema",
             name: schema.name,
-            // strict mode is what makes OpenAI enforce the schema;
-            // toStrictJsonSchema normalizes a copy to meet its rules
-            // (additionalProperties:false, all-required). The cast bridges the
-            // SDK's JSONSchema return, which lacks a string index signature.
-            schema: toStrictJsonSchema(schema.schema) as Record<
-              string,
-              unknown
-            >,
+            schema: toStrictSchema(schema.schema),
             strict: true,
           },
         }

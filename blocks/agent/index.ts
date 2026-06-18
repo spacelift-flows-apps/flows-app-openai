@@ -16,6 +16,7 @@ import {
   clearTimeoutTimer,
   tryAcquireProcessingLock,
   releaseProcessingLock,
+  toStrictSchema,
 } from "../shared";
 import { resolveAuth } from "../../client";
 
@@ -333,10 +334,9 @@ export const agent: AppBlock = {
       type: {
         type: "object",
         properties: {
-          output: input.block.config.outputSchema ?? {
-            type: "string",
-            description: "The generated response",
-          },
+          output: input.block.config.outputSchema
+            ? toStrictSchema(input.block.config.outputSchema)
+            : { type: "string", description: "The generated response" },
           usage: {
             type: "object",
             properties: {
