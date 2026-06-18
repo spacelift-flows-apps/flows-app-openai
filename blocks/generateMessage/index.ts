@@ -1,4 +1,4 @@
-import { AppBlock, events } from "@slflows/sdk/v1";
+import { AppBlock } from "@slflows/sdk/v1";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -15,6 +15,8 @@ import {
   clearTimeoutTimer,
   tryAcquireProcessingLock,
   releaseProcessingLock,
+  getOrCreatePending,
+  failPending,
 } from "../shared";
 import { resolveAuth } from "../../client";
 
@@ -177,9 +179,10 @@ export const generateMessage: AppBlock = {
           reasoningEffort,
         } = validateConfig(input.app.config, input.event.inputConfig);
 
-        const pendingId = await events.createPending({
-          statusDescription: "Calling OpenAI model...",
-        });
+        const pendingId = await getOrCreatePending(
+          input.event.id,
+          "Calling OpenAI model...",
+        );
 
         return executeTurn({
           pendingId,
@@ -262,7 +265,8 @@ export const generateMessage: AppBlock = {
       });
 
       if (!haveAllResults) {
-        await events.cancelPending(
+        await failPending(
+          eventId,
           state.pendingId,
           "Timeout waiting for tool results",
         );

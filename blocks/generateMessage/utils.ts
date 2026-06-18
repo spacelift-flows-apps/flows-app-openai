@@ -9,6 +9,7 @@ import {
   ToolDefinition,
   buildToolChoice,
   cleanToolName,
+  failPending,
   extractOutputText,
   getFunctionCalls,
   joinToolNames,
@@ -299,7 +300,8 @@ export async function executeTurn(params: {
   try {
     // Backstop against runaway loops: cap the number of model round-trips.
     if (params.turn >= MAX_TOOL_TURNS) {
-      await events.cancelPending(
+      await failPending(
+        eventId,
         pendingId,
         `Reached the maximum of ${MAX_TOOL_TURNS} model turns without a final answer.`,
       );
@@ -344,7 +346,8 @@ export async function executeTurn(params: {
         // text - surface why instead of silently emitting an empty result.
         if (response.status === "incomplete") {
           const reason = response.incomplete_details?.reason ?? "unknown";
-          return await events.cancelPending(
+          return await failPending(
+            eventId,
             pendingId,
             `Response incomplete: ${reason}`,
           );
@@ -452,7 +455,7 @@ export async function executeTurn(params: {
     return setTimeoutTimer(eventId, nextTurn);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await events.cancelPending(pendingId, `API call failed: ${message}`);
+    await failPending(eventId, pendingId, `API call failed: ${message}`);
     await deleteCallState(eventId);
     throw error;
   }

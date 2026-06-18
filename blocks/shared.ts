@@ -332,3 +332,35 @@ export async function releaseProcessingLock(
     lockId,
   });
 }
+
+// One pending per event id, so a redelivery reuses it instead of orphaning another.
+export async function getOrCreatePending(
+  id: string,
+  statusDescription: string,
+) {
+  const { value } = await kv.block.get(`pending-${id}`);
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  const pendingId = await events.createPending({ statusDescription });
+  await kv.block.set({ key: `pending-${id}`, value: pendingId, ttl: 60 * 60 });
+
+  return pendingId;
+}
+
+// Cancel the pending if still ours; clear the marker so a retry starts fresh.
+export async function failPending(
+  id: string,
+  pendingId: string,
+  reason: string,
+) {
+  try {
+    await events.cancelPending(pendingId, reason);
+  } catch {
+    return;
+  }
+
+  await kv.block.delete([`pending-${id}`]);
+}
