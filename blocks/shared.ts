@@ -154,10 +154,12 @@ export function streamResponse(params: {
           },
         }
       : undefined,
-    // Stateless: we carry the full conversation ourselves. Encrypted reasoning
-    // lets reasoning items survive across tool-call turns without server storage.
+    // Stateless: we carry the full conversation ourselves. A reasoning model emits
+    // reasoning items even with no effort set; under store:false they must carry
+    // their encrypted_content to be replayed across tool turns, so always request
+    // it (a no-op when there are no reasoning items).
     store: false,
-    include: reasoningEffort ? ["reasoning.encrypted_content"] : undefined,
+    include: ["reasoning.encrypted_content"],
   });
 }
 
