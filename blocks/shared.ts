@@ -13,7 +13,7 @@ export const MAX_TOOL_TURNS = 16;
 export interface ToolDefinition {
   blockId?: string;
   name: string;
-  description: string;
+  description?: string;
   schema?: Record<string, any>;
 }
 

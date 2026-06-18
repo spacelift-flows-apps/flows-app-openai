@@ -60,7 +60,7 @@ export const agent: AppBlock = {
               description: "Schema of the tool's input",
             },
           },
-          required: ["name", "description"],
+          required: ["name"],
         },
       },
       required: false,
