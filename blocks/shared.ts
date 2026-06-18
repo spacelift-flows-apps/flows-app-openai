@@ -105,6 +105,16 @@ export function buildToolChoice(force: boolean | string, hasTools: boolean) {
   return force === true ? ("required" as const) : ("auto" as const);
 }
 
+// Which models accept reasoning-only request fields like encrypted reasoning content
+export function isReasoningModel(model: string) {
+  return (
+    model.startsWith("o1") ||
+    model.startsWith("o3") ||
+    model.startsWith("o4-mini") ||
+    (model.startsWith("gpt-5") && !model.startsWith("gpt-5-chat"))
+  );
+}
+
 export function streamResponse(params: {
   auth: OpenAIAuth;
   model: string;
@@ -154,12 +164,12 @@ export function streamResponse(params: {
           },
         }
       : undefined,
-    // Stateless: we carry the full conversation ourselves. A reasoning model emits
-    // reasoning items even with no effort set; under store:false they must carry
-    // their encrypted_content to be replayed across tool turns, so always request
-    // it (a no-op when there are no reasoning items).
+    // Reasoning items replay under store:false only with encrypted_content,
+    // which only reasoning models accept.
     store: false,
-    include: ["reasoning.encrypted_content"],
+    include: isReasoningModel(model)
+      ? ["reasoning.encrypted_content"]
+      : undefined,
   });
 }
 
@@ -217,20 +227,20 @@ export async function streamToResponse(
   return response;
 }
 
-// Carry the model's full output into the next turn's input. With store:false we
-// own the conversation, so every item must be replayed - dropping server-side
-// tool artifacts (mcp_call, ...) would lose context and break prompt caching.
-// message/reasoning/function_call are valid input as-is; hosted-tool items are
-// too, but their input variants are nominally distinct, so each is coerced alone.
+// Replay the model's output as the next turn's input: under store:false every
+// item must come back, but reasoning items replay only with encrypted_content.
 export function toInputItems(output: OpenAI.Responses.ResponseOutputItem[]) {
   const items: InputItem[] = [];
 
   for (const item of output) {
-    if (
-      item.type === "message" ||
-      item.type === "reasoning" ||
-      item.type === "function_call"
-    ) {
+    if (item.type === "reasoning") {
+      if (item.encrypted_content) {
+        items.push(item);
+      }
+      continue;
+    }
+
+    if (item.type === "message" || item.type === "function_call") {
       items.push(item);
     } else {
       items.push(item as unknown as InputItem);
@@ -365,4 +375,13 @@ export async function failPending(
   }
 
   await kv.block.delete([`pending-${id}`]);
+}
+
+// Retry transient failures (429, 5xx, non-HTTP); a 4xx is deterministic.
+export function isRetryableError(error: unknown) {
+  if (error instanceof OpenAI.APIError && typeof error.status === "number") {
+    return error.status === 429 || error.status >= 500;
+  }
+
+  return true;
 }

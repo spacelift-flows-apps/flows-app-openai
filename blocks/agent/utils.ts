@@ -16,6 +16,7 @@ import {
   setTimeoutTimer,
   streamResponse,
   streamToResponse,
+  isRetryableError,
   toInputItems,
 } from "../shared";
 
@@ -501,6 +502,10 @@ export async function executeTurn(params: {
       `API call failed: ${message}`,
     );
     await deleteCallState(executionId);
-    throw error;
+
+    // Re-throw only transient errors; a 4xx would just retry the same failure.
+    if (isRetryableError(error)) {
+      throw error;
+    }
   }
 }
