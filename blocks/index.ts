@@ -1,32 +1,15 @@
-/**
- * Block Registry for {{APP_NAME}}
- *
- * This file exports all blocks as a dictionary for easy registration.
- *
- * Usage in main.ts:
- *   import { blocks } from "./blocks/index.ts";
- *   export const app: App = {
- *     blocks: Object.values(blocks)
- *   };
- *
- * Adding new blocks:
- * 1. Create your block file (e.g., myBlock.ts)
- * 2. Import and add it to the blocks dictionary below
- * 3. Export it for type safety and external use
- */
+import { generateMessage } from "./generateMessage/index";
+import { toolDefinition } from "./toolDefinition";
+import { remoteMcpServer } from "./remoteMcpServer";
+import { httpRequest } from "./httpRequest";
+import { agent } from "./agent/index";
+import { agentToolResult } from "./agentToolResult";
 
-import { exampleBlock } from "./exampleBlock";
-
-/**
- * Dictionary of all available blocks
- * Key: block identifier (for programmatic access)
- * Value: block definition
- */
 export const blocks = {
-  example: exampleBlock,
-  // Add more blocks here:
-  // myNewBlock: myNewBlock,
+  agent,
+  agentToolResult,
+  generateMessage,
+  toolDefinition,
+  remoteMcpServer,
+  httpRequest,
 } as const;
-
-// Named exports for individual blocks (optional, for external imports)
-export { exampleBlock };
