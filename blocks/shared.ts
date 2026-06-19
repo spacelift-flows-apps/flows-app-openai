@@ -10,6 +10,26 @@ export type ReasoningEffort = OpenAI.Reasoning["effort"];
 // forced tool choice) can't loop forever.
 export const MAX_TOOL_TURNS = 16;
 
+const STREAM_TIMEOUT_MS = 5 * 60 * 1000;
+
+class StreamTimeoutError extends Error {
+  constructor() {
+    super(
+      `Turn exceeded the ${STREAM_TIMEOUT_MS / 60_000}-minute model stream limit`,
+    );
+    this.name = "StreamTimeoutError";
+  }
+}
+
+export function describeFailure(error: unknown) {
+  if (error instanceof StreamTimeoutError) {
+    return error.message;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return `API call failed: ${message}`;
+}
+
 export interface ToolDefinition {
   blockId?: string;
   name: string;
@@ -105,6 +125,21 @@ export function buildToolChoice(force: boolean | string, hasTools: boolean) {
   return force === true ? ("required" as const) : ("auto" as const);
 }
 
+export function validateMcpServerUrl(rawUrl: string) {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return "URL is invalid";
+  }
+
+  if (url.protocol !== "https:") {
+    return "URL must use https://";
+  }
+
+  return null;
+}
+
 // Which models accept reasoning-only request fields like encrypted reasoning content
 export function isReasoningModel(model: string) {
   return (
@@ -144,80 +179,102 @@ export function streamResponse(params: {
 
   const client = createClient(auth, maxRetries);
 
-  return client.responses.stream({
-    model,
-    input,
-    instructions,
-    max_output_tokens: maxOutputTokens,
-    tools: tools.length > 0 ? tools : undefined,
-    tool_choice: toolChoice,
-    // Reasoning models reject `temperature`; only send it when explicitly set.
-    ...(temperature !== undefined ? { temperature } : {}),
-    ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
-    text: schema
-      ? {
-          format: {
-            type: "json_schema",
-            name: schema.name,
-            schema: toStrictSchema(schema.schema),
-            strict: true,
-          },
-        }
-      : undefined,
-    // Reasoning items replay under store:false only with encrypted_content,
-    // which only reasoning models accept.
-    store: false,
-    include: isReasoningModel(model)
-      ? ["reasoning.encrypted_content"]
-      : undefined,
-  });
+  const signal = AbortSignal.timeout(STREAM_TIMEOUT_MS);
+  const stream = client.responses.stream(
+    {
+      model,
+      input,
+      instructions,
+      max_output_tokens: maxOutputTokens,
+      tools: tools.length > 0 ? tools : undefined,
+      tool_choice: toolChoice,
+      // Reasoning models reject `temperature`; only send it when explicitly set.
+      ...(temperature !== undefined ? { temperature } : {}),
+      ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
+      text: schema
+        ? {
+            format: {
+              type: "json_schema",
+              name: schema.name,
+              schema: toStrictSchema(schema.schema),
+              strict: true,
+            },
+          }
+        : undefined,
+      // Reasoning items replay under store:false only with encrypted_content,
+      // which only reasoning models accept.
+      store: false,
+      include: isReasoningModel(model)
+        ? ["reasoning.encrypted_content"]
+        : undefined,
+    },
+    { signal },
+  );
+
+  return { stream, signal };
 }
 
-// Consumes the stream to drive live pending-status updates and returns the raw
-// response from the terminal event. Avoids stream.finalResponse(), which injects
-// non-input fields (parsed_arguments/parsed) that break re-feeding output as the
-// next turn's input.
+// Consume the stream for live status updates and return the raw terminal
+// response. Avoids finalResponse(), which injects parsed fields that break
+// re-feeding the output as the next turn's input.
 export async function streamToResponse(
   pendingId: string,
-  stream: ReturnType<typeof streamResponse>,
+  { stream, signal }: ReturnType<typeof streamResponse>,
 ) {
   let response: OpenAI.Responses.Response | undefined;
 
-  for await (const event of stream) {
-    if (
-      event.type === "response.completed" ||
-      event.type === "response.incomplete"
-    ) {
-      response = event.response;
-      continue;
-    }
+  try {
+    for await (const event of stream) {
+      if (event.type === "error") {
+        throw new Error(event.message);
+      }
 
-    if (event.type !== "response.output_item.added") {
-      continue;
-    }
+      if (event.type === "response.failed") {
+        throw new Error(
+          event.response.error?.message ?? "Model response failed",
+        );
+      }
 
-    switch (event.item.type) {
-      case "reasoning":
-        await events.updatePending(pendingId, {
-          statusDescription: "Reasoning...",
-        });
-        break;
-      case "function_call":
-        await events.updatePending(pendingId, {
-          statusDescription: "Preparing tool call...",
-        });
-        break;
-      case "mcp_call":
-        await events.updatePending(pendingId, {
-          statusDescription: `Calling "${event.item.name}" on "${event.item.server_label}"`,
-        });
-        break;
-      case "message":
-        await events.updatePending(pendingId, {
-          statusDescription: "Generating response...",
-        });
-        break;
+      if (
+        event.type === "response.completed" ||
+        event.type === "response.incomplete"
+      ) {
+        response = event.response;
+        continue;
+      }
+
+      if (event.type !== "response.output_item.added") {
+        continue;
+      }
+
+      switch (event.item.type) {
+        case "reasoning":
+          await events.updatePending(pendingId, {
+            statusDescription: "Reasoning...",
+          });
+          break;
+        case "function_call":
+          await events.updatePending(pendingId, {
+            statusDescription: "Preparing tool call...",
+          });
+          break;
+        case "mcp_call":
+          await events.updatePending(pendingId, {
+            statusDescription: `Calling "${event.item.name}" on "${event.item.server_label}"`,
+          });
+          break;
+        case "message":
+          await events.updatePending(pendingId, {
+            statusDescription: "Generating response...",
+          });
+          break;
+      }
     }
+  } catch (error) {
+    if (signal.aborted) {
+      throw new StreamTimeoutError();
+    }
+    throw error;
   }
 
   if (!response) {
@@ -257,10 +314,9 @@ export function getFunctionCalls(response: OpenAI.Responses.Response) {
   );
 }
 
-// `response.output_text` is only computed by the SDK for auto-parseable requests
-// (zod text formats / strict tools); with plain prompts and raw JSON schemas it
-// stays undefined. Aggregate the assistant text from the output items, the same
-// way the SDK's own addOutputText() does.
+// `response.output_text` isn't reliably populated on the raw streamed response,
+// so aggregate the message `output_text` parts ourselves (as the SDK's
+// addOutputText does).
 export function extractOutputText(response: OpenAI.Responses.Response) {
   return response.output
     .filter(
@@ -296,10 +352,10 @@ export function joinToolNames(
   )}`;
 }
 
-// Both Agent and Generate blocks run the same stateless multi-turn loop:
-// dispatch tool calls, wait for results, then continue. These helpers own the `timer-<id>` and
-// `process-<id>-<turn>` keys; `id` is whatever the block uses to scope a run
-// (an event id for the Generate block, an execution id for the Agent block).
+// Both Agent and Generate blocks run the same stateless multi-turn loop: dispatch
+// tool calls, wait for results, then continue. These helpers own the `timer-<id>`
+// and `process-<id>-<turn>` keys, where `id` is the input event id (named
+// `eventId` in Generate, `executionId` in Agent).
 
 export async function setTimeoutTimer(id: string, turn: number) {
   const timerId = await timers.block.set(60 * 2, {
@@ -319,9 +375,10 @@ export async function clearTimeoutTimer(id: string) {
   }
 }
 
-// Per-turn atomic lock so concurrent tool results (parallel tool calls) and a
-// firing timeout can't both advance the same turn. Whoever wins drives the
-// continuation; everyone else records their result and returns.
+// Per-turn lock so parallel tool results and a firing timeout can't both advance
+// the same turn — the winner continues, the rest record and return. The static
+// timeout sits above the stream cap, so it can't lapse mid-turn (no renewal) and
+// only frees once the holder dies; `ttl` reaps the row releaseLock leaves behind.
 export async function tryAcquireProcessingLock(
   id: string,
   turn: number,
@@ -330,7 +387,8 @@ export async function tryAcquireProcessingLock(
   return kv.block.set({
     key: `process-${id}-${turn}`,
     value: { lockId },
-    lock: { id: lockId, timeout: 300 },
+    lock: { id: lockId, timeout: 6 * 60 },
+    ttl: 60 * 60,
   });
 }
 
@@ -345,7 +403,6 @@ export async function releaseProcessingLock(
   });
 }
 
-// One pending per event id, so a redelivery reuses it instead of orphaning another.
 export async function getOrCreatePending(
   id: string,
   statusDescription: string,
@@ -362,26 +419,15 @@ export async function getOrCreatePending(
   return pendingId;
 }
 
-// Cancel the pending if still ours; clear the marker so a retry starts fresh.
+export async function clearPendingMarker(id: string) {
+  await kv.block.delete([`pending-${id}`]);
+}
+
 export async function failPending(
   id: string,
   pendingId: string,
   reason: string,
 ) {
-  try {
-    await events.cancelPending(pendingId, reason);
-  } catch {
-    return;
-  }
-
-  await kv.block.delete([`pending-${id}`]);
-}
-
-// Retry transient failures (429, 5xx, non-HTTP); a 4xx is deterministic.
-export function isRetryableError(error: unknown) {
-  if (error instanceof OpenAI.APIError && typeof error.status === "number") {
-    return error.status === 429 || error.status >= 500;
-  }
-
-  return true;
+  await events.cancelPending(pendingId, reason).catch(() => {});
+  await clearPendingMarker(id);
 }

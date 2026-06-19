@@ -1,4 +1,5 @@
 import { AppBlock } from "@slflows/sdk/v1";
+import { validateMcpServerUrl } from "./shared";
 
 async function listMcpTools(
   url: string,
@@ -88,6 +89,11 @@ export const remoteMcpServer: AppBlock = {
           };
         }
 
+        const urlError = validateMcpServerUrl(url);
+        if (urlError) {
+          return { suggestedValues: [], message: urlError };
+        }
+
         try {
           const tools = await listMcpTools(url, authorizationToken);
           const query = searchPhrase?.toLowerCase();
@@ -109,8 +115,27 @@ export const remoteMcpServer: AppBlock = {
     },
   },
 
+  signals: {
+    definition: {
+      name: "Definition",
+      description:
+        "MCP server configuration consumed by the Generate response block.",
+      sensitive: true,
+      sensitivity: "never_show",
+    },
+  },
+
   onSync: async (input) => {
     const config = input.block.config;
+
+    const urlError = validateMcpServerUrl(config.url);
+    if (urlError) {
+      return {
+        newStatus: "failed",
+        customStatusDescription: urlError,
+      };
+    }
+
     const toolAccess = config.toolAccess ?? "all";
 
     const allowedTools =

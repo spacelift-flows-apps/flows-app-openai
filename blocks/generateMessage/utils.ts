@@ -9,6 +9,8 @@ import {
   ToolDefinition,
   buildToolChoice,
   cleanToolName,
+  clearPendingMarker,
+  describeFailure,
   failPending,
   extractOutputText,
   getFunctionCalls,
@@ -17,8 +19,8 @@ import {
   setTimeoutTimer,
   streamResponse,
   streamToResponse,
-  isRetryableError,
   toInputItems,
+  validateMcpServerUrl,
 } from "../shared";
 
 function processToolDefinitions(toolDefinitions: ToolDefinition[]) {
@@ -93,11 +95,19 @@ export function validateConfig(
 
   const schema = inputConfig.schema as Record<string, any> | undefined;
 
+  const mcpServers = (inputConfig.mcpServers ?? []) as McpServer[];
+  for (const server of mcpServers) {
+    const urlError = validateMcpServerUrl(server.url);
+    if (urlError) {
+      throw new Error(`MCP server "${server.name}": ${urlError}`);
+    }
+  }
+
   return {
     auth,
     model,
     toolDefinitions: (inputConfig.toolDefinitions ?? []) as ToolDefinition[],
-    mcpServers: (inputConfig.mcpServers ?? []) as McpServer[],
+    mcpServers,
     prompt: inputConfig.prompt as string,
     maxOutputTokens: inputConfig.maxTokens as number,
     instructions: inputConfig.systemPrompt as string | undefined,
@@ -313,7 +323,7 @@ export async function executeTurn(params: {
     const { tools, toolNames, toolBlockIds } =
       processToolDefinitions(toolDefinitions);
 
-    const stream = streamResponse({
+    const streamResult = streamResponse({
       auth,
       model,
       maxOutputTokens,
@@ -332,7 +342,7 @@ export async function executeTurn(params: {
       maxRetries,
     });
 
-    const response = await streamToResponse(pendingId, stream);
+    const response = await streamToResponse(pendingId, streamResult);
 
     const functionCalls = getFunctionCalls(response);
 
@@ -379,6 +389,7 @@ export async function executeTurn(params: {
         );
       } finally {
         await deleteCallState(eventId);
+        await clearPendingMarker(eventId);
       }
     }
 
@@ -455,13 +466,7 @@ export async function executeTurn(params: {
 
     return setTimeoutTimer(eventId, nextTurn);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    await failPending(eventId, pendingId, `API call failed: ${message}`);
+    await failPending(eventId, pendingId, describeFailure(error));
     await deleteCallState(eventId);
-
-    // Re-throw only transient errors; a 4xx would just retry the same failure.
-    if (isRetryableError(error)) {
-      throw error;
-    }
   }
 }

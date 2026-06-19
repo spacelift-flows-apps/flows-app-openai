@@ -179,6 +179,10 @@ export const generateMessage: AppBlock = {
           reasoningEffort,
         } = validateConfig(input.app.config, input.event.inputConfig);
 
+        if (await loadCallState(input.event.id)) {
+          return;
+        }
+
         const pendingId = await getOrCreatePending(
           input.event.id,
           "Calling OpenAI model...",

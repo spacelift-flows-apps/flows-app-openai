@@ -10,6 +10,7 @@ import {
   continueTurn,
   validateConfig,
   getToolDefinitionOutputKey,
+  validateToolDefinitionNames,
 } from "./utils";
 import {
   setTimeoutTimer,
@@ -157,15 +158,17 @@ export const agent: AppBlock = {
           input.event.inputConfig,
         );
 
+        if (await loadCallState(input.event.id)) {
+          return;
+        }
+
         const pendingId = await getOrCreatePending(
           input.event.id,
           "Calling OpenAI model...",
         );
 
-        const executionId = randomUUID();
-
         return executeTurn({
-          executionId,
+          executionId: input.event.id,
           blockId: input.block.id,
           pendingId,
           eventIds: [],
@@ -181,7 +184,6 @@ export const agent: AppBlock = {
           schema,
           reasoningEffort,
           temperature,
-          originalEventId: input.event.id,
         });
       },
     },
@@ -247,7 +249,6 @@ export const agent: AppBlock = {
         reasoningEffort: state.reasoningEffort,
         temperature: state.temperature,
         auth: resolveAuth(input.app.config),
-        originalEventId: state.originalEventId,
       });
     } finally {
       await releaseProcessingLock(executionId, state.turn, lockId);
@@ -283,7 +284,7 @@ export const agent: AppBlock = {
 
       if (!haveAllResults) {
         await failPending(
-          state.originalEventId,
+          executionId,
           state.pendingId,
           "Timeout waiting for tool results",
         );
@@ -310,7 +311,6 @@ export const agent: AppBlock = {
         reasoningEffort: state.reasoningEffort,
         temperature: state.temperature,
         auth: resolveAuth(input.app.config),
-        originalEventId: state.originalEventId,
       });
     } finally {
       await releaseProcessingLock(executionId, state.turn, lockId);
@@ -318,6 +318,13 @@ export const agent: AppBlock = {
   },
 
   onSync: async (input) => {
+    const toolDefinitions = input.block.config.toolDefinitions ?? [];
+
+    const toolNameError = validateToolDefinitionNames(toolDefinitions);
+    if (toolNameError) {
+      return { newStatus: "failed", customStatusDescription: toolNameError };
+    }
+
     const outputUpdates: Record<
       string,
       Partial<AppBlockComponentOutput> | null
@@ -355,7 +362,7 @@ export const agent: AppBlock = {
 
     let order = 10;
 
-    for (const toolDefinition of input.block.config.toolDefinitions ?? []) {
+    for (const toolDefinition of toolDefinitions) {
       outputUpdates[getToolDefinitionOutputKey(toolDefinition.name)] = {
         name: toolDefinition.name,
         description: toolDefinition.description,

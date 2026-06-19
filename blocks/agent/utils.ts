@@ -8,6 +8,8 @@ import {
   ToolDefinition,
   buildToolChoice,
   cleanToolName,
+  clearPendingMarker,
+  describeFailure,
   failPending,
   extractOutputText,
   getFunctionCalls,
@@ -16,7 +18,6 @@ import {
   setTimeoutTimer,
   streamResponse,
   streamToResponse,
-  isRetryableError,
   toInputItems,
 } from "../shared";
 
@@ -36,7 +37,6 @@ interface CallState {
   schema: JsonSchema | undefined;
   reasoningEffort: ReasoningEffort | undefined;
   temperature: number | undefined;
-  originalEventId: string;
 }
 
 export function createInvocationId(
@@ -62,7 +62,28 @@ export function parseInvocationId(invocationId: string) {
 }
 
 export function getToolDefinitionOutputKey(name: string) {
-  return `tool_definition_${name.toLowerCase().replace(/\s+/g, "_")}`;
+  return `tool_definition_${cleanToolName(name)}`;
+}
+
+export function validateToolDefinitionNames(toolDefinitions: ToolDefinition[]) {
+  const originalNameByNormalized = new Map<string, string>();
+
+  for (const toolDefinition of toolDefinitions) {
+    const normalizedName = cleanToolName(toolDefinition.name);
+
+    if (!normalizedName) {
+      return `The tool name "${toolDefinition.name}" needs at least one letter or number.`;
+    }
+
+    const existingName = originalNameByNormalized.get(normalizedName);
+    if (existingName !== undefined) {
+      return `Two tools would end up with the same name "${normalizedName}": "${existingName}" and "${toolDefinition.name}". Please give each a distinct name.`;
+    }
+
+    originalNameByNormalized.set(normalizedName, toolDefinition.name);
+  }
+
+  return null;
 }
 
 function processToolDefinitions(toolDefinitions: ToolDefinition[]) {
@@ -128,12 +149,12 @@ async function emitResult(params: {
     output: unknown;
     usage: { inputTokens: number; outputTokens: number };
   };
-  originalEventId: string;
+  executionId: string;
   eventIds: string[];
 }) {
-  // Parent is the most recent tool result, or the original input if no tools were called.
+  // Parent is the first tool result, or the original input if no tools were called.
   const parentEventId =
-    params.eventIds.length > 0 ? params.eventIds[0] : params.originalEventId;
+    params.eventIds.length > 0 ? params.eventIds[0] : params.executionId;
 
   // Other tool results as secondary parents (the original is already an ancestor).
   const secondaryParentEventIds =
@@ -157,7 +178,6 @@ async function storeCallState(params: {
   executionId: string;
   blockId: string;
   eventIds: string[];
-  originalEventId: string;
   pendingId: string;
   inputItems: InputItem[];
   toolCalls: OpenAI.Responses.ResponseFunctionToolCall[];
@@ -263,7 +283,6 @@ export async function continueTurn(params: {
   auth: OpenAIAuth;
   reasoningEffort: ReasoningEffort | undefined;
   temperature: number | undefined;
-  originalEventId: string;
 }) {
   const { pendingId, inputItems, toolCallIds, toolResults } = params;
 
@@ -294,7 +313,6 @@ export async function executeTurn(params: {
   executionId: string;
   blockId: string;
   pendingId: string;
-  originalEventId: string;
   eventIds: string[];
   inputItems: InputItem[];
   toolDefinitions: ToolDefinition[];
@@ -325,14 +343,13 @@ export async function executeTurn(params: {
     schema,
     blockId,
     eventIds,
-    originalEventId,
   } = params;
 
   try {
     // Backstop against runaway loops: cap the number of model round-trips.
     if (params.turn >= MAX_TOOL_TURNS) {
       await failPending(
-        originalEventId,
+        executionId,
         pendingId,
         `Reached the maximum of ${MAX_TOOL_TURNS} model turns without a final answer.`,
       );
@@ -343,7 +360,7 @@ export async function executeTurn(params: {
     const { tools, toolNames, toolOutputKeys } =
       processToolDefinitions(toolDefinitions);
 
-    const stream = streamResponse({
+    const streamResult = streamResponse({
       auth,
       model,
       maxOutputTokens,
@@ -362,7 +379,7 @@ export async function executeTurn(params: {
       maxRetries,
     });
 
-    const response = await streamToResponse(pendingId, stream);
+    const response = await streamToResponse(pendingId, streamResult);
 
     const functionCalls = getFunctionCalls(response);
 
@@ -378,7 +395,7 @@ export async function executeTurn(params: {
         if (response.status === "incomplete") {
           const reason = response.incomplete_details?.reason ?? "unknown";
           return await failPending(
-            originalEventId,
+            executionId,
             pendingId,
             `Response incomplete: ${reason}`,
           );
@@ -405,10 +422,11 @@ export async function executeTurn(params: {
             },
           },
           eventIds,
-          originalEventId,
+          executionId,
         });
       } finally {
         await deleteCallState(executionId);
+        await clearPendingMarker(executionId);
       }
     }
 
@@ -426,7 +444,6 @@ export async function executeTurn(params: {
       executionId,
       blockId,
       eventIds,
-      originalEventId,
       pendingId,
       inputItems: nextInputItems,
       toolCalls: functionCalls,
@@ -456,7 +473,7 @@ export async function executeTurn(params: {
               toolNames[toolCall.name] ?? toolCall.name
             }" is not available.`,
             turn: nextTurn,
-            eventId: originalEventId,
+            eventId: executionId,
           }),
         ),
     );
@@ -485,7 +502,7 @@ export async function executeTurn(params: {
             },
             {
               outputKey: toolOutputKeys[toolCall.name],
-              parentEventId: originalEventId,
+              parentEventId: executionId,
               secondaryParentEventIds:
                 eventIds.length > 0 ? eventIds : undefined,
             },
@@ -495,17 +512,7 @@ export async function executeTurn(params: {
 
     return setTimeoutTimer(executionId, nextTurn);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    await failPending(
-      originalEventId,
-      pendingId,
-      `API call failed: ${message}`,
-    );
+    await failPending(executionId, pendingId, describeFailure(error));
     await deleteCallState(executionId);
-
-    // Re-throw only transient errors; a 4xx would just retry the same failure.
-    if (isRetryableError(error)) {
-      throw error;
-    }
   }
 }
