@@ -109,9 +109,9 @@ export const agent: AppBlock = {
         reasoningEffort: {
           name: "Reasoning effort",
           description:
-            "Constrains reasoning effort for reasoning models. Higher effort produces more thorough responses at higher cost and latency. Leave unset to use the model default.",
+            "Constrains reasoning effort for reasoning models. Higher effort produces more thorough responses at higher cost and latency. Supported values depend on the model. Leave unset to use the model default.",
           type: {
-            enum: ["none", "minimal", "low", "medium", "high", "xhigh"],
+            enum: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
           },
           required: false,
         },

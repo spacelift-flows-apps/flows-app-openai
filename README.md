@@ -35,7 +35,7 @@ OpenAI's Responses API supports structured output in the same request as tool us
 
 ## Reasoning
 
-For reasoning-capable models (e.g. the GPT‑5 family and o‑series), set **Reasoning effort** to control how much the model reasons before responding. Leave it unset to use the model's default. Reasoning models do not support the `temperature` parameter.
+For reasoning-capable models (e.g. the GPT‑5 and GPT‑6 families and o‑series), set **Reasoning effort** to control how much the model reasons before responding. Leave it unset to use the model's default. Reasoning models do not support the `temperature` parameter.
 
 ## Development
 
