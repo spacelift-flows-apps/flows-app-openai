@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 
-export const OPENAI_DEFAULT_MODEL = "gpt-5.5";
+export const OPENAI_DEFAULT_MODEL = "gpt-6.1-terra";
 
 export interface OpenAIAuth {
   apiKey: string;
